@@ -106,7 +106,9 @@ static double secondsPerSegment = 1.0;
 // or on macOS:
 //   for f in frames/*.ppm; do sips -s format jpeg "$f" --out "${f%.ppm}.jpg"; done
 static bool   captureFrames = false;
-static int    captureFrameIndex = 0;
+static int    captureFrameIndex = 0;        // written frame count
+static int    captureTick = 0;              // display frames seen since capture started
+static int    captureStride = 4;            // write one PPM per this many rendered frames
 static string captureFolder = "frames";
 
 //======================= Functions =============================
@@ -488,7 +490,11 @@ static void displayFunction()
   }
 
   if (captureFrames)
-    captureCurrentFrame();
+  {
+    if ((captureTick % captureStride) == 0)
+      captureCurrentFrame();
+    captureTick++;
+  }
 
   glutSwapBuffers();
 }
@@ -598,7 +604,9 @@ static void keyboardFunc(unsigned char key, int x, int y)
       {
         ensureCaptureDir();
         captureFrameIndex = 0;
-        cout << "Frame capture ON -> writing PPM to '" << captureFolder << "/'" << endl;
+        captureTick = 0;
+        cout << "Frame capture ON -> writing PPM to '" << captureFolder
+             << "/' (every " << captureStride << "th rendered frame)" << endl;
       }
       else
       {

@@ -270,25 +270,7 @@ user can resume dragging seamlessly when they pause.
 
 `F` toggles writing the back buffer to `frames/frame_NNNN.ppm` each rendered
 frame (P6 binary). PPM is chosen to avoid pulling in a JPEG encoder
-dependency; the grading rubric asks for JPEG, which is one shell command
-away.
-
-Recommended capture workflow for the submission animation:
-
-```
-mkdir frames                              # F creates it too, but explicit is fine
-./driver armadillo/skin.config
-# inside: record poses with p, press space, then F to capture; F again to stop
-
-# Convert PPMs to JPEGs at quality 2 (near-lossless):
-ffmpeg -framerate 15 -i frames/frame_%04d.ppm -q:v 2 frames/frame_%04d.jpg
-
-# Or, without ffmpeg (macOS only):
-for f in frames/*.ppm; do sips -s format jpeg "$f" --out "${f%.ppm}.jpg"; done
-```
-
-The assignment requires 800×600 at 15 fps, ≤600 frames; the default window is
-already 800×600 and the conversion command bakes in the 15 fps framerate.
+dependency; 
 
 ## File Map
 
