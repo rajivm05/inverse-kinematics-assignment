@@ -41,7 +41,7 @@ p_deformed = Σ_j w_{j,v} · M_skin_j · p_rest
 ```
 
 where `M_skin_j = M_global_j(current) · M_global_j(rest)^-1`. Weights are
-static; we precompute the joint index table and iterate over the fixed number
+static; the joint index table is precomputed and the inner loop iterates over the fixed number
 of influencing joints per vertex.
 
 ### Forward Kinematics
@@ -49,14 +49,14 @@ of influencing joints per vertex.
 The local transform of a joint is built from its rest translation and two
 rotations — the joint orientation (XYZ) and the user-controlled Euler angles
 (in the joint's declared rotate order). These match Maya's convention. The
-global transform is the parent's global times the local. We precompute
-`jointUpdateOrder` so the traversal visits parents before children. For
-skinning we multiply by the inverse rest-pose global transform.
+global transform is the parent's global times the local. `jointUpdateOrder`
+is precomputed so the traversal visits parents before children. For
+skinning, the global is multiplied by the inverse rest-pose global transform.
 
 ### Inverse Kinematics (Tikhonov)
 
 Let `θ` be the flattened joint Euler angles and `b(θ)` the concatenated
-world-space handle positions. Given a target `b*`, we solve:
+world-space handle positions. Given a target `b*`, the solver computes:
 
 ```
 (J^T J + α I) Δθ = J^T (b* − b(θ))
@@ -64,9 +64,9 @@ world-space handle positions. Given a target `b*`, we solve:
 
 with small α > 0 (Tikhonov regularization) to keep the normal matrix
 non-singular when handles are under-constrained. The Jacobian `J = ∂b/∂θ` is
-produced by ADOL-C: we trace the FK function once into an ADOL-C tape, then
-evaluate the Jacobian on demand. The linear system is solved with Eigen's
-`ldlt()`.
+produced by ADOL-C: the FK function is traced once into an ADOL-C tape, and
+the Jacobian is evaluated on demand. The linear system is solved with
+Eigen's `ldlt()`.
 
 Two ADOL-C tapes coexist in the process — tag `1` traces joint-handle FK and
 tag `2` traces vertex-handle FK (see extra credit).
@@ -121,9 +121,9 @@ influencing joints. Toggle live with `d` to compare.
 
 ### 2. IK Handles at Mesh Vertices
 
-Instead of solving to move skeleton joints, we solve to move specific mesh
-vertices. This is what you'd actually want in a rig — grabbing a fingertip
-instead of a wrist joint.
+Instead of solving to move skeleton joints, this mode solves to move
+specific mesh vertices. This is what a real rig actually wants — grabbing a
+fingertip instead of a wrist joint.
 
 Implementation: a second IK object is built with its own ADOL-C tape. The
 traced function first computes joint global transforms (same as joint mode),
@@ -145,9 +145,9 @@ current pose is a poor predictor of the target pose, and the solve overshoots
 or gets stuck. Sub-stepping fixes this by breaking large motions into
 smaller, linearly-trustworthy steps.
 
-Implementation: at the start of `doIK`, we measure the maximum displacement
-across all handles. If it exceeds `maxStepDistance` (tuned to `modelRadius *
-0.05` by the driver), we split the motion into
+Implementation: at the start of `doIK`, the maximum displacement across all
+handles is measured. If it exceeds `maxStepDistance` (tuned to
+`modelRadius * 0.05` by the driver), the motion is split into
 `ceil(maxDisplacement / maxStepDistance)` sub-steps (capped at
 `maxSubSteps = 20`). Each sub-step linearly interpolates the target from the
 starting position to the final target, re-evaluates the Jacobian at the
@@ -165,23 +165,67 @@ Toggle with `i` to A/B compare. With sub-stepping off, large drags produce
 wildly overshooting or twisted poses; with it on, the pose stays in the
 locally-valid neighborhood that the Jacobian describes.
 
-## IK Algorithm Notes & Comparison
+## Algorithms Implemented
 
-Only Tikhonov damped least squares was implemented. A short comparison to
-alternatives we didn't use:
+One core IK solver — Tikhonov damped least squares with α = 0.01 — exposed
+in two modes, with an optional sub-stepping wrapper. The comparisons below
+are between these variants.
 
-| Approach                  | Pros                                      | Cons                                                                |
-|---------------------------|-------------------------------------------|---------------------------------------------------------------------|
-| Jacobian transpose        | Trivial, no matrix solve                  | Slow convergence, direction is correct but step size is guesswork   |
-| Damped least squares (what we do) | Stable near singularities, tunable via α | Still local; needs sub-stepping for large motions                    |
-| SVD pseudo-inverse        | Minimum-norm solution                     | More expensive per step; still local                                |
-| Cyclic coordinate descent | No Jacobian, cheap per iteration          | Order-dependent, produces chain-like "snake" poses                  |
-| FABRIK                    | Very fast, intuitive                      | Designed for chains; multi-handle on a hierarchy is awkward         |
-| Nonlinear optimizer (BFGS, L-M) | Globally better                     | Much more code; needs good line search                              |
+### Single-step Tikhonov vs sub-stepped Tikhonov
 
-Sub-stepping is orthogonal — it linearises the problem locally and applies
-repeatedly. It turns our linear Tikhonov step into a crude nonlinear solver
-along the target trajectory.
+Same solver, same α. The only difference is whether a large handle
+displacement is fed to the solver all at once, or split into
+`ceil(maxDrag / maxStepDistance)` sub-steps (up to 20) that each get their
+own Jacobian evaluation and Tikhonov solve.
+
+| Aspect                  | Single step                                         | Sub-stepped                                                     |
+|-------------------------|-----------------------------------------------------|------------------------------------------------------------------|
+| Small drags (< threshold) | Identical — no sub-stepping kicks in              | Identical                                                        |
+| Large drags             | Jacobian is evaluated far from target; pose overshoots or twists into a bad local minimum | Each sub-step stays in the linearization's trust region; pose tracks the target smoothly |
+| Cost per frame          | One Jacobian + one solve                            | Up to 20× that (but only on the frames that actually need it)    |
+| Failure mode            | Visible snapping / flipping limbs on big yanks      | Graceful; still subject to the underlying limitations below      |
+
+The sub-step count is logged whenever it exceeds 1, e.g.
+`IK sub-steps: 17 (max handle drag 0.947651)`. Toggle the wrapper with `i`
+to A/B compare on the same drag. Sub-stepping does not change what the
+solver is "allowed" to produce — it just keeps each linearization honest.
+
+### Joint-handle IK vs vertex-handle IK
+
+Both modes use the same Tikhonov solver and the same sub-stepping wrapper.
+They differ only in what the ADOL-C-traced forward function outputs:
+
+- **Joint mode (tape tag 1):** output is the 3D world position of each
+  listed skeleton joint. Handle count = number of joints named in
+  `*IKJointIDs`.
+- **Vertex mode (tape tag 2):** output is the 3D world position of each
+  listed mesh vertex, obtained by first computing joint globals and then
+  skinning (linear blend) the rest vertex position through them. Handle
+  count = number of vertices named in `*IKVertexIDs`.
+
+| Aspect                     | Joint handles                                         | Vertex handles                                             |
+|----------------------------|-------------------------------------------------------|-------------------------------------------------------------|
+| What you grab              | Skeleton pivot points (elbow, wrist, ankle…)          | Specific points on the skin (fingertip, nose tip, tail tip) |
+| Intuitiveness for posing   | Lower — you're pulling the bone, not the surface      | Higher — directly manipulates what you can see             |
+| Tape setup cost            | Cheap — small output dimension                        | Slightly larger output dim; one extra skinning pass in the trace |
+| Per-step solve cost        | Same                                                  | Same (Jacobian shape matches handle count in both cases)   |
+| Interaction with DQS render | Faithful — joint global positions are identical under LBS and DQS | Inconsistent — trace skins with LBS even when render is DQS (see Limitations) |
+
+Runtime switching is wired to `v`; both IK objects are preloaded at startup
+so there's no rebuild cost when toggling.
+
+### Skinning: LBS vs DQS
+
+Independent of IK, two skinning implementations share the same vertex data
+and are toggled live with `d`:
+
+| Aspect              | Linear blend (LBS)                          | Dual quaternion (DQS)                                        |
+|---------------------|---------------------------------------------|---------------------------------------------------------------|
+| Blend quantity      | 4×4 rigid matrices                          | Unit dual quaternions (with antipodality correction)          |
+| Cost per vertex     | Cheapest — matrix-vector blend              | ~2–3× more (quaternion blend + normalization)                 |
+| Volume at bends     | Collapses ("candy-wrapper" at ~90°)         | Preserved — blended transform stays rigid                     |
+| Artifacts           | Pinching in twisted forearms, elbows        | Slight bulging at extreme blends; no pinching                 |
+| Where it matters    | Barely visible at small joint angles        | Most visible on the armadillo forearm, dragon tail            |
 
 ### Known Limitations
 
